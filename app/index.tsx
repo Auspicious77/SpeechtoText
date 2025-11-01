@@ -110,6 +110,7 @@ export default function HomeScreen() {
       setState('error');
       return;
     }
+    console.log('[PTT] Permission granted', ok);
 
     try {
       // Check if live recognizer is available
@@ -117,8 +118,9 @@ export default function HomeScreen() {
       console.log('[PTT] Live recognition available:', liveAvailable);
       
       // Use live recognition if available and we're in success scenario
-      const useLive = liveAvailable && scenario === 'success';
+      const useLive = liveAvailable
       liveModeRef.current = useLive;
+
 
       setState('listening');
       
@@ -176,7 +178,7 @@ export default function HomeScreen() {
 
   const handleStop = async () => {
     console.log('[PTT] ========== HANDLE STOP ==========');
-    console.log('[PTT] Live mode:', liveModeRef.current);
+    console.log('[PTT] Live mode:', liveModeRef);
     
     try {
       // If we started a live recognition session, stop it and use its transcript
@@ -194,10 +196,11 @@ export default function HomeScreen() {
         }, ...prev]);
         
         setClarifyPrompt(null);
-        
-        if (scenario === 'success' && transcript) {
+     
           await audioManager.playNextSuccessSound().catch(console.error);
-        }
+
+         
+   
         
         setState('idle');
         liveModeRef.current = false;
@@ -391,6 +394,8 @@ export default function HomeScreen() {
               const delayPromise = new Promise((r) => setTimeout(r, 2000));
               const [{ res }] = await Promise.all([callPromise, delayPromise]);
 
+              console.log('resss::::', res);
+
               if (res.kind === 'ok') {
                 const newRecording = {
                   transcript: res.transcript,
@@ -404,7 +409,10 @@ export default function HomeScreen() {
                 }
                 setState('idle');
               } else if (res.kind === 'clarification') {
+                // console.log('resss::::', res)
+                     await audioManager.playNextSuccessSound().catch(console.error);
                 setClarifyPrompt(res.prompt);
+           
                 setState('clarification');
               }
             } catch (err: any) {
