@@ -8,16 +8,21 @@ import {
   View,
 } from 'react-native';
 
+type UiState = 'idle' | 'listening' | 'processing' | 'clarification' | 'error';
+
+
 type Props = {
   onStart: () => Promise<void> | void;
   onStop: () => Promise<void> | void;
-  state: 'idle' | 'recording' | 'processing';
+  state: 'idle' | 'recording' | 'processing' | 'clarification' | 'error' | 'listening';
 };
 
 export const PttButton: React.FC<Props> = ({ onStart, onStop, state }) => {
   const [isRecording, setIsRecording] = React.useState(false);
   const isProcessingRef = React.useRef(false);
   const longPressRef = React.useRef(false);
+
+  console.log('PTT Button state:', state, 'isRecording:', isRecording);
 
   const startRecording = React.useCallback(async () => {
     if (isProcessingRef.current || isRecording) return;
@@ -89,7 +94,7 @@ export const PttButton: React.FC<Props> = ({ onStart, onStop, state }) => {
       </TouchableOpacity>
 
       <Text style={[styles.label, !isIdle && styles.activeLabel]}>
-        {isIdle ? 'Tap or Hold to Talk' : 'Recording...'}
+        {isIdle ? 'Tap or Hold to Talk' : state === 'processing'? 'Processing': 'Recording...'}
       </Text>
     </View>
   );
@@ -128,7 +133,7 @@ const styles = StyleSheet.create({
     opacity: 0.9,
   },
   activeLabel: {
-    color: '#E74C3C',
+    color: 'blue',
     fontWeight: '700',
   },
 });

@@ -1,3 +1,4 @@
+// AudioService.ts
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 
@@ -6,8 +7,9 @@ const RECORDING_MIME = 'audio/m4a';
 export class AudioService {
   private recording: Audio.Recording | null = null;
   private initPromise: Promise<void> | null = null;
+  private recordingStartTs: number | null = null; // manual start time fallback
 
-  private async initAudioMode() {
+  private async initAudioMode(): Promise<void> {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
       try {
@@ -16,7 +18,6 @@ export class AudioService {
           allowsRecordingIOS: true,
           playsInSilentModeIOS: true,
           staysActiveInBackground: false,
-          // Use boolean flags for broad compatibility across SDKs
           shouldDuckAndroid: true,
         });
       } catch (e) {
@@ -30,8 +31,11 @@ export class AudioService {
 
   async ensurePermission(): Promise<boolean> {
     try {
-      const res = await Audio.requestPermissionsAsync();
-      return (res && (res.granted ?? res.status === 'granted')) ?? false;
+      // Expo AV's permissions API returns different shapes across SDKs; guard defensively.
+      // This is the recommended call for ask-on-first-use behavior.
+      // For newer SDKs, Audio.requestPermissionsAsync() exists.
+      const res: any = await (Audio as any).requestPermissionsAsync?.() ?? (Audio as any).getPermissionsAsync?.();
+      return !!(res && (res.granted ?? res.status === 'granted'));
     } catch (e) {
       console.warn('[AudioService] ensurePermission error:', e);
       return false;
@@ -39,9 +43,9 @@ export class AudioService {
   }
 
   async startRecording(): Promise<void> {
+    // If there's an existing recording object, cancel/cleanup it first.
     if (this.recording) {
-      // If a recording is already present, cancel it first
-      await this.cancelRecording();
+      await this.cancelRecording().catch(() => {});
     }
 
     await this.initAudioMode();
@@ -51,7 +55,7 @@ export class AudioService {
 
     const rec = new Audio.Recording();
     try {
-      // Prepare with conservative options compatible across SDKs
+      // Prepare to record (these options are compatible across platforms)
       await rec.prepareToRecordAsync({
         android: {
           extension: '.m4a',
@@ -70,24 +74,27 @@ export class AudioService {
           bitRate: 128000,
         },
         web: {
-          mimeType: 'audio/webm'
-        }
+          // web uses mimeType
+          mimeType: 'audio/webm',
+        },
       });
+
       await rec.startAsync();
       this.recording = rec;
-    } catch (e) {
-      // Clean up partial recording object
+      this.recordingStartTs = Date.now();
+      console.log('[AudioService] recording started');
+    } catch (err) {
+      // Ensure we clean up partial recording
       try {
+        // stop/unload if possible
         // @ts-ignore
         if (rec && typeof rec.stopAndUnloadAsync === 'function') {
-          // attempt to stop/unload if possible
           await (rec as any).stopAndUnloadAsync();
         }
-      } catch (err) {
-        // swallow
-      }
+      } catch (_) {}
       this.recording = null;
-      throw e;
+      this.recordingStartTs = null;
+      throw err;
     }
   }
 
@@ -99,7 +106,7 @@ export class AudioService {
         await rec.stopAndUnloadAsync();
         return;
       }
-      // Try unload if exposed
+      // fallback: try unload if available
       // @ts-ignore
       if (typeof (rec as any).unloadAsync === 'function') {
         // @ts-ignore
@@ -110,84 +117,130 @@ export class AudioService {
     }
   }
 
-  async stopRecording(): Promise<{ uri: string; mimeType: string; duration?: number }> {
+  /**
+   * stopRecording
+   * returns { uri, mimeType, duration } with duration in milliseconds
+   */
+  async stopRecording(): Promise<{ uri: string; mimeType: string; duration: number }> {
     if (!this.recording) throw new Error('No active recording');
 
     const rec = this.recording;
-    try {
-      // Read status first
-      const status = await rec.getStatusAsync().catch(() => ({} as any));
-      const duration = (status && (status.durationMillis ?? status.duration)) ?? undefined;
+    this.recording = null; // clear immediately so subsequent calls are safe
 
-      // Stop/unload defensively
+    try {
+      // Stop and unload the recording (this finalizes the file)
+      // stopAndUnloadAsync exists on Audio.Recording
+      // on some platforms it may throw; we catch below if needed.
       try {
         await rec.stopAndUnloadAsync();
-      } catch (e) {
+      } catch (stopErr) {
+        // attempt safe unload/stop
         await this.safeStopAndUnload(rec);
       }
 
-      // Retrieve URI and verify file
       const uri = rec.getURI();
-      this.recording = null;
-
       if (!uri) throw new Error('Recording file missing');
 
-      // small delay to ensure FS sync on some platforms
-      await new Promise((r) => setTimeout(r, 80));
+      // Give the filesystem a short moment to flush data
+      await new Promise((r) => setTimeout(r, 150));
 
-      const info = await FileSystem.getInfoAsync(uri);
-      if (!info.exists || (info.size ?? 0) === 0) {
+      // Use FileSystem.statAsync (Expo) to get file info (replace deprecated getInfoAsync)
+      // statAsync returns { size, modificationTime, uri, exists } on modern SDKs
+      let info: any = null;
+      try {
+        info = await FileSystem.statAsync(uri);
+      } catch (e) {
+        // statAsync might fail on some platforms; log and continue
+        console.warn('[AudioService] statAsync failed:', e);
+      }
+
+      // Verify file exists and has size when info is available
+      if (info && (info.exists === false || (typeof info.size === 'number' && info.size <= 0))) {
         throw new Error('Recorded file is missing or empty');
       }
 
+      // Try to get duration from the recording status (some SDKs set durationMillis)
+      const status = await rec.getStatusAsync().catch(() => ({} as any));
+      let duration = (status && (status.durationMillis ?? status.duration)) ?? undefined;
+
+      // If duration is not provided, fall back to manual estimate using start timestamp
+      if (typeof duration !== 'number' || isNaN(duration)) {
+        if (this.recordingStartTs) {
+          duration = Date.now() - this.recordingStartTs;
+        } else {
+          duration = 1000; // fallback 1s
+        }
+      }
+
+      // Ensure duration is a number
+      duration = Math.max(0, Number(duration));
+
+      console.log('[AudioService] saved recording', { uri, duration, info });
       return { uri, mimeType: RECORDING_MIME, duration };
     } catch (e) {
-      this.recording = null;
+      console.error('[AudioService] stopRecording failed:', e);
+      // ensure we attempt to clean up this recording
+      try {
+        await this.safeStopAndUnload(rec);
+      } catch (_) {}
       throw e;
+    } finally {
+      // reset manual start ts
+      this.recordingStartTs = null;
     }
   }
 
   async cancelRecording(): Promise<void> {
     if (!this.recording) return;
     const rec = this.recording;
+    this.recording = null;
+    this.recordingStartTs = null;
+
     try {
       await this.safeStopAndUnload(rec);
-    } catch (e) {
-      // swallow
-    }
+    } catch (_) {}
+
     // try to delete temp file if exists
     try {
       const uri = rec.getURI();
       if (uri) {
-        const info = await FileSystem.getInfoAsync(uri);
-        if (info.exists) await FileSystem.deleteAsync(uri, { idempotent: true });
+        // use statAsync to check existence
+        const info = await FileSystem.statAsync(uri).catch(() => null);
+        if (info && info.exists) {
+          await FileSystem.deleteAsync(uri, { idempotent: true });
+        }
       }
     } catch (_) {
       // ignore
     }
-    this.recording = null;
   }
 
   async cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
     try {
-      const dir = (FileSystem as any).cacheDirectory || (FileSystem as any).documentDirectory || null;
+      const dir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
       if (!dir) return;
+
       const entries = await FileSystem.readDirectoryAsync(dir);
       const now = Date.now();
-      await Promise.all(entries.map(async (name) => {
-        try {
-          const path = dir + name;
-          if (!name.toLowerCase().match(/\.m4a|\.caf|\.wav|\.mp3|\.webm/)) return;
-          const info = await FileSystem.getInfoAsync(path);
-          if (!info.exists) return;
-          const mod = (info.modificationTime ?? Date.now());
-          if (now - mod > maxAgeMs) {
-            await FileSystem.deleteAsync(path, { idempotent: true });
+
+      await Promise.all(
+        entries.map(async (name) => {
+          try {
+            if (!name.match(/\.(m4a|caf|wav|mp3|webm)$/i)) return;
+            const path = dir + name;
+            const s = await FileSystem.statAsync(path).catch(() => null);
+            if (!s) return;
+            const mod = s.modificationTime ?? 0;
+            // modificationTime sometimes in seconds; try to detect scale
+            const modMs = mod > 0 && mod < 1e12 ? mod * 1000 : mod;
+            if (now - modMs > maxAgeMs) {
+              await FileSystem.deleteAsync(path, { idempotent: true }).catch(() => {});
+            }
+          } catch (_) {
+            // ignore per-file
           }
-        } catch (e) {
-          // ignore per-file
-        }
-      }));
+        })
+      );
     } catch (e) {
       // ignore
     }

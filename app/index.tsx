@@ -5,7 +5,7 @@ import { ScenarioToggle } from '@/components/scenario-toggle';
 import { TimePickerOverlay } from '@/components/time-picker-overlay';
 import { audioManager } from '@/services/AudioManager';
 import { audioService } from '@/services/AudioService';
-import { ProcessVoiceInput, voiceApi } from '@/services/VoiceApi';
+import { ProcessVoiceInput, ProcessVoiceResult, voiceApi } from '@/services/VoiceApi';
 import React, { useEffect, useState } from 'react';
 import {
   Animated,
@@ -17,7 +17,7 @@ import {
   View
 } from 'react-native';
 
-type UiState = 'idle' | 'listening' | 'processing' | 'clarification' | 'error';
+type UiState = 'idle' | 'listening' | 'processing' | 'clarification' | 'error' | 'cancelled';
 
 type Recording = {
   transcript: string;
@@ -45,6 +45,42 @@ export default function HomeScreen() {
   useEffect(() => {
     voiceApi.setScenario(scenario);
   }, [scenario]);
+
+  console.log('clarifyPrompt::::', clarifyPrompt);
+
+  // Automatically simulate scenarios when toggled
+useEffect(() => {
+  // Reset previous states
+  setErrorMessage(null);
+  setClarifyPrompt(null);
+  setState('idle');
+
+  switch (scenario) {
+    case 'networkError':
+      setErrorMessage('Network error: Please check your internet connection and try again.');
+      setState('error');
+      break;
+
+    case 'serverError':
+      setErrorMessage('Server error: Something went wrong on our end. Please try again later.');
+      setState('error');
+      break;
+
+    case 'clarify':
+      setClarifyPrompt('What time would you like to set the meeting to?');
+      setState('clarification');
+      break;
+
+    case 'success':
+    default:
+      // Reset to normal idle state
+      setErrorMessage(null);
+      setClarifyPrompt(null);
+      setState('idle');
+      break;
+  }
+}, [scenario]);
+
   
   // Show time picker when we get a time-related clarification prompt
   useEffect(() => {
@@ -142,121 +178,183 @@ export default function HomeScreen() {
     }
   };
 
-  const handleCancel = async () => {
-    console.log('[PTT] Cancelling...');
-    try {
-      if (liveModeRef.current) {
-        await voiceApi.stopLiveRecognition();
-        liveModeRef.current = false;
-      } else {
-        await audioService.cancelRecording();
-      }
-      setState('idle');
-      console.log('[PTT] Cancelled');
-    } catch (e) {
-      console.error('[PTT] Cancel failed:', e);
-      setState('idle');
+  // const handleCancel = async () => {
+  //   console.log('[PTT] Cancelling...');
+  //   await voiceApi.stopLiveRecognition();
+  //   try {
+  //     if (liveModeRef.current) {
+  //       await voiceApi.stopLiveRecognition();
+  //       liveModeRef.current = false;
+  //       setState('cancelled');
+  //     } else {
+  //       await audioService.cancelRecording();
+       
+  //        liveModeRef.current = false;
+
+  //       setState('cancelled');
+
+  //     }
+  //     setState('idle');
+  //     console.log('[PTT] Cancelled');
+  //   } catch (e) {
+  //     console.error('[PTT] Cancel failed:', e);
+  //     setState('idle');
+  //     liveModeRef.current = false;
+  //   }
+  // };
+
+
+const handleCancel = async () => {
+  console.log('[PTT] Cancelling...');
+
+  try {
+    // Set a temporary UI state so the cancel animation (if any) can trigger
+    setState('cancelled');
+
+    if (liveModeRef.current) {
+      // Stop live recognition safely
+      console.log('[PTT] Stopping LIVE recognition on cancel...');
+      await voiceApi.stopLiveRecognition().catch((err) =>
+        console.warn('[PTT] Live stop failed (cancel):', err)
+      );
       liveModeRef.current = false;
+    } else {
+      // Stop file recording if active
+      console.log('[PTT] Stopping FILE recording on cancel...');
+      await audioService.stopRecording().catch(async (err) => {
+        console.warn('[PTT] stopRecording failed, attempting cancelRecording...', err);
+        await audioService.cancelRecording().catch(console.error);
+      });
     }
-  };
 
-  // Process the recording and return the API result without mutating UI state.
+    // Optional: clean up temporary recording files
+    audioService.cleanupOldRecordings().catch(console.error);
+
+    // Wait briefly to smooth UI transition
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Reset everything cleanly to default
+    setClarifyPrompt(null);
+    setErrorMessage(null);
+    liveModeRef.current = false;
+    setState('idle');
+
+    console.log('[PTT] Cancel completed → returned to idle state');
+  } catch (e) {
+    console.error('[PTT] Cancel failed:', e);
+    // Even if an error occurs, reset the UI
+    setClarifyPrompt(null);
+    setErrorMessage(null);
+    liveModeRef.current = false;
+    setState('idle');
+  }
+};
+
   const processRecording = async (uri: string, mimeType: string, durationMs?: number) => {
-    console.log('[PTT] Processing recording (api call):', { uri, mimeType });
+  console.log('[PTT] Processing recording (api call):', { uri, mimeType });
 
-    const input: ProcessVoiceInput = {
-      audioUri: uri,
-      mimeType,
-      clientTs: new Date().toISOString(),
-      context: state === 'clarification' ? { previousPrompt: clarifyPrompt } : undefined
-    };
-
-    const res = await voiceApi.processVoice(input);
-    console.log('[PTT] Process result (raw):', res);
-    return { res, durationMs } as { res: any; durationMs?: number };
+  const input: ProcessVoiceInput = {
+    audioUri: uri,
+    mimeType,
+    clientTs: new Date().toISOString(),
+    context: state === 'clarification' && clarifyPrompt
+      ? { previousPrompt: clarifyPrompt }
+      : undefined,
   };
+
+  const res = await voiceApi.processVoice(input);
+  console.log('[PTT] Process result (raw):', res);
+
+  // Handle clarification response here directly
+  if (res.kind === 'clarification') {
+    setClarifyPrompt(res.prompt); // store the prompt for follow-up
+    setState('clarification');
+  }
+
+  return { res, durationMs } as { res: ProcessVoiceResult; durationMs?: number };
+};
+
+
 
   const handleStop = async () => {
-    console.log('[PTT] ========== HANDLE STOP ==========');
-    console.log('[PTT] Live mode:', liveModeRef);
-    
-    try {
-      // If we started a live recognition session, stop it and use its transcript
-      if (liveModeRef.current) {
-        console.log('[PTT] Stopping LIVE recognition...');
-        setState('processing');
-        const transcript = await voiceApi.stopLiveRecognition();
-        console.log('[PTT] Live transcript:', transcript);
+  console.log('[PTT] ========== HANDLE STOP ==========');
+  console.log('[PTT] Live mode:', liveModeRef.current);
+  
+  try {
+    if (liveModeRef.current) {
+      console.log('[PTT] Stopping LIVE recognition...');
 
-        // Add the transcript directly
-        setRecordings(prev => [{ 
-          transcript: transcript || '(no speech detected)', 
-          uri: '', 
-          timestamp: Date.now() 
-        }, ...prev]);
-        
-        setClarifyPrompt(null);
-     
-          await audioManager.playNextSuccessSound().catch(console.error);
-
-         
-   
-        
-        setState('idle');
-        liveModeRef.current = false;
-        return;
-      }
-
-      // File-based recording mode
-      console.log('[PTT] Stopping FILE recording...');
-      const { uri, mimeType, duration } = await audioService.stopRecording();
-      console.log('[PTT] Recording saved:', { uri, mimeType });
-
-      // Show processing state while we call the API. We'll ensure the UI shows
-      // a 'Processing...' indicator for at least 2 seconds before adding the transcript.
-      setState('processing');
-
-      try {
-        const callPromise = processRecording(uri, mimeType, duration);
-        const delayPromise = new Promise((r) => setTimeout(r, 2000));
-        const [{ res }, _] = await Promise.all([callPromise, delayPromise]);
-
-        if (res.kind === 'ok') {
-          const durationSec = typeof duration === 'number' ? Math.round(duration / 1000) : undefined;
-          const newRecording = {
-            transcript: res.transcript,
-            uri,
-            timestamp: Date.now(),
-            durationSec
-          };
-          setRecordings(prev => [newRecording, ...prev]);
-          setClarifyPrompt(null);
-          if (scenario === 'success') {
             await audioManager.playNextSuccessSound().catch(console.error);
-          }
-          setState('idle');
-        } else if (res.kind === 'clarification') {
-          setClarifyPrompt(res.prompt);
-          setState('clarification');
-        }
-      } catch (err: any) {
-        console.error('[PTT] Processing failed after stop:', err);
-        const msg = err?.message ?? 'Couldn\'t process that. Please try again.';
-        setErrorMessage(msg);
-        setState('error');
-      }
-    } catch (e) {
-      console.error('[PTT] ========== HANDLE STOP FAILED ==========');
-      console.error('[PTT] Error:', e);
-      
-      const errorMsg = (e as Error).message || 'Could not process recording. Please try again.';
-      setErrorMessage(errorMsg);
-      setState('error');
-      liveModeRef.current = false;
-    }
-  };
+      setState('processing');
+        // const delayPromise = new Promise((r) => setTimeout(r, 2000));
+      const transcript = await voiceApi.stopLiveRecognition();
+      console.log('[PTT] Live transcript:', transcript);
 
-  // Helper to format timestamp
+      setRecordings(prev => [{ 
+        transcript: transcript || '(no speech detected)', 
+        uri: '', 
+        timestamp: Date.now() 
+      }, ...prev]);
+      
+      setClarifyPrompt(null);
+
+      setState('idle');
+      liveModeRef.current = false;
+      return;
+    }
+
+    // File-based recording mode
+    console.log('[PTT] Stopping FILE recording...');
+    setState('processing');
+    
+    const { uri, mimeType, duration } = await audioService.stopRecording();
+    console.log('[PTT] Recording saved:', { uri, mimeType, duration });
+
+    if (!uri) {
+      throw new Error('Recording failed - no audio file created');
+    }
+
+    try {
+      const callPromise = processRecording(uri, mimeType, duration);
+      const delayPromise = new Promise((r) => setTimeout(r, 2000));
+      const [{ res }] = await Promise.all([callPromise, delayPromise]);
+
+      if (res.kind === 'ok') {
+        const durationSec = Math.round(duration / 1000);
+        const newRecording = {
+          transcript: res.transcript,
+          uri,
+          timestamp: Date.now(),
+          durationSec
+        };
+        setRecordings(prev => [newRecording, ...prev]);
+        setClarifyPrompt(null);
+        if (scenario === 'success') {
+          await audioManager.playNextSuccessSound().catch(console.error);
+        }
+        setState('idle');
+      } else if (res.kind === 'clarification') {
+        setClarifyPrompt(res.prompt);
+        setState('clarification');
+      }
+    } catch (processingError) {
+      console.error('[PTT] Processing failed:', processingError);
+      const msg = processingError?.message ?? 'Couldn\'t process that. Please try again.';
+      setErrorMessage(msg);
+      setState('error');
+    }
+
+  } catch (e) {
+    console.error('[PTT] ========== HANDLE STOP FAILED ==========');
+    console.error('[PTT] Error:', e);
+    
+    const errorMsg = (e as Error).message || 'Could not process recording. Please try again.';
+    setErrorMessage(errorMsg);
+    setState('error');
+    liveModeRef.current = false;
+  }
+};
+  
   const getOrdinal = (n: number) => {
     const v = n % 100;
     if (v >= 11 && v <= 13) return 'th';
@@ -513,16 +611,16 @@ const styles = StyleSheet.create({
     padding: 18,
     borderRadius: 20,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-    borderLeftWidth: 4,
-    borderLeftColor: '#0A84FF',
+    // shadowColor: '#000',
+    // shadowOffset: {
+    //   width: 0,
+    //   height: 2,
+    // },
+    // shadowOpacity: 0.08,
+    // shadowRadius: 8,
+    // elevation: 3,
+    // borderLeftWidth: 4,
+    // borderLeftColor: '#0A84FF',
   },
   transcriptHeader: {
     flexDirection: 'row',
