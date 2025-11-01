@@ -67,8 +67,11 @@ useEffect(() => {
       break;
 
     case 'clarify':
-      setClarifyPrompt('What time would you like to set the meeting to?');
+      setTimeout(() => {
+         setClarifyPrompt('What time would you like to set the meeting to?');
       setState('clarification');
+      }, 5000); // slight delay before showing clarification
+     
       break;
 
     case 'success':
