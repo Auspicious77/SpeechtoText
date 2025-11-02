@@ -181,31 +181,6 @@ useEffect(() => {
     }
   };
 
-  // const handleCancel = async () => {
-  //   console.log('[PTT] Cancelling...');
-  //   await voiceApi.stopLiveRecognition();
-  //   try {
-  //     if (liveModeRef.current) {
-  //       await voiceApi.stopLiveRecognition();
-  //       liveModeRef.current = false;
-  //       setState('cancelled');
-  //     } else {
-  //       await audioService.cancelRecording();
-       
-  //        liveModeRef.current = false;
-
-  //       setState('cancelled');
-
-  //     }
-  //     setState('idle');
-  //     console.log('[PTT] Cancelled');
-  //   } catch (e) {
-  //     console.error('[PTT] Cancel failed:', e);
-  //     setState('idle');
-  //     liveModeRef.current = false;
-  //   }
-  // };
-
 
 const handleCancel = async () => {
   console.log('[PTT] Cancelling...');
@@ -230,7 +205,7 @@ const handleCancel = async () => {
       });
     }
 
-    // Optional: clean up temporary recording files
+    // clean up temporary recording files
     audioService.cleanupOldRecordings().catch(console.error);
 
     // Wait briefly to smooth UI transition
