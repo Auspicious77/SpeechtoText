@@ -365,7 +365,7 @@ const styles = StyleSheet.create({
 
 ```typescript
 const sound = new Audio.Sound();
-await sound.loadAsync(require('../assets/audio/your-sound.mp3'));
+await sound.loadAsync(require('../assets/audio/audiofile1.mp3'));
 ```
 
 ## 📄 License
